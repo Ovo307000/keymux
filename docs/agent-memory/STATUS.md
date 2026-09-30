@@ -17,6 +17,16 @@ KeyMux 1.0.0 - a single-entry, key-based egress router.
 * The two `anyrouter-*` routes carry the two AnyRouter keys that opencodex also
   holds (`providers.anyrouter` and `providers.anyrouter-2`), so the same key can
   leave from a fixed, per-key IP. AgentRouter is deliberately not routed here.
+* Codex reaches KeyMux through opencodex, which gained two extra providers:
+
+  | opencodex provider | base URL | Codex model id | labelled |
+  | --- | --- | --- | --- |
+  | `keymux-local-relay-a` | `http://127.0.0.1:9000/v1` | `keymux-local-relay-a/gpt-6-astra` | 本地中转 A（AnyRouter key1） |
+  | `keymux-local-relay-b` | `http://127.0.0.1:9000/v1` | `keymux-local-relay-b/gpt-6-astra` | 本地中转 B（AnyRouter key2） |
+
+  Both are `adapter=openai-responses` with `allowPrivateNetwork`, each trusting
+  one KeyMux router key, and all other models those providers pulled in are
+  disabled. Everything that existed before is untouched, AgentRouter included.
 * Clash Verge Rev has the four pinned listeners written into the merge profile
   `m9eBW8npCB07.yaml` of the currently selected subscription
   (`RaxfGroTgUC5`, 小火箭加速v260810).
