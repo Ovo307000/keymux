@@ -1,0 +1,52 @@
+# KeyMux example configuration.
+#
+# Copy to `config.yaml` and replace the ${...} placeholders with the names of
+# the environment variables that hold the real values (see `.env.example`).
+#
+# URL rule: the upstream URL is `base_url` + the incoming request path +
+# the incoming query string. So a client calling
+# `http://127.0.0.1:9000/v1/chat/completions` with
+# `base_url: https://api.example.com` reaches
+# `https://api.example.com/v1/chat/completions`.
+
+server:
+  # KeyMux refuses to bind anything but a loopback address unless
+  # `allow_non_loopback` is set to true on purpose.
+  host: 127.0.0.1
+  port: 9000
+  allow_non_loopback: false
+
+upstream_defaults:
+  connect_timeout_seconds: 15
+  # Read timeout applies between two chunks, so long SSE streams are fine.
+  read_timeout_seconds: 600
+  write_timeout_seconds: 60
+  pool_timeout_seconds: 15
+  max_connections: 64
+  max_keepalive_connections: 16
+
+routes:
+  account-a:
+    # The key clients send: Authorization: Bearer ${ROUTER_KEY_A}
+    incoming_key: ${ROUTER_KEY_A}
+    upstream:
+      # Origin only. The client's /v1/... path is appended verbatim.
+      base_url: https://api.example.com
+      api_key: ${REAL_API_KEY_A}
+      # Optional: defaults to Authorization + "Bearer ".
+      api_key_header: Authorization
+      authorization_scheme: Bearer
+    egress:
+      # Internal only: Codex never sees this port. The endpoint belongs to
+      # Clash/Mihomo and pins the public exit IP.
+      proxy: http://127.0.0.1:7893
+      label: node-a
+
+  account-b:
+    incoming_key: ${ROUTER_KEY_B}
+    upstream:
+      base_url: https://api.example.com
+      api_key: ${REAL_API_KEY_B}
+    egress:
+      proxy: http://127.0.0.1:7894
+      label: node-b
