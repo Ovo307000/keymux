@@ -22,7 +22,7 @@ KeyMux 1.0.0 - a single-entry, key-based egress router.
   per-router-key proof that each key forwards its own real key and leaves from
   its own IP, sequentially and under concurrency.
 * `POST /v1/responses` works both streaming (SSE) and non-streaming.
-* `python -m unittest discover -s tests -t .` - 51 tests pass.
+* `python -m unittest discover -s tests -t .` - 62 tests pass.
 * No router key or real key appears in `logs/`.
 
 ## Fixed after review
@@ -36,6 +36,10 @@ KeyMux 1.0.0 - a single-entry, key-based egress router.
   not start, and only discovered it after overwriting both files. It now
   validates nodes, ports, the resulting YAML and pre-existing `listeners:`
   before writing, and restores backups on a rejected reload.
+* A second review round closed the remaining gaps: any spelling of a foreign
+  top-level `listeners:`, a write failure, a restoring reload that also fails,
+  and non-finite numeric configuration values. The tool now has 10 tests of its
+  own.
 
 ## Open items
 

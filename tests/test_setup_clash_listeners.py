@@ -117,8 +117,12 @@ class SetupClashListenersTests(unittest.TestCase):
         for foreign in ("listeners: []\n", "listeners: {}\n", "listeners: # mine\n  - name: mine\n"):
             with self.subTest(foreign=foreign):
                 self._write(self.merge, MERGE_CONFIGURATION + foreign)
+                before = self.merge.read_text(encoding="utf-8")
+
                 with self.assertRaises(SystemExit):
                     self.run_tool(*self.standard_arguments())
+
+                self.assertEqual(self.merge.read_text(encoding="utf-8"), before)
                 self.assertEqual(self.runtime.read_text(encoding="utf-8"), RUNTIME_CONFIGURATION)
 
     def test_an_out_of_range_port_is_refused(self) -> None:
@@ -142,6 +146,9 @@ class SetupClashListenersTests(unittest.TestCase):
             self.run_tool("--listener", "same", "7893", NODE_A,
                           "--listener", "same", "7894", NODE_B)
 
+        self.assertEqual(self.merge.read_text(encoding="utf-8"), MERGE_CONFIGURATION)
+        self.assertEqual(self.runtime.read_text(encoding="utf-8"), RUNTIME_CONFIGURATION)
+
     def test_a_rejected_reload_restores_both_files(self) -> None:
         self._patch(tool.mihomo_controller, "reload_runtime_config", mock.Mock(return_value=(500, b"bad config")))
 
@@ -149,6 +156,25 @@ class SetupClashListenersTests(unittest.TestCase):
 
         self.assertIn("rejected", self.stderr)
         self.assertIn("restored", self.stderr)
+        # The restoring reload is also failing here, and that must be said out loud.
+        self.assertIn("the restored configuration was also rejected", self.stderr)
+        self.assertEqual(self.merge.read_text(encoding="utf-8"), MERGE_CONFIGURATION)
+        self.assertEqual(self.runtime.read_text(encoding="utf-8"), RUNTIME_CONFIGURATION)
+
+    def test_a_write_failure_rolls_back_both_files(self) -> None:
+        original_write_text = Path.write_text
+        writes = {"count": 0}
+
+        def fail_on_the_second_write(path, data, *arguments, **keywords):
+            writes["count"] += 1
+            if writes["count"] == 2:
+                raise OSError("disk full")
+            return original_write_text(path, data, *arguments, **keywords)
+
+        with mock.patch.object(Path, "write_text", fail_on_the_second_write):
+            self.assertEqual(self.run_tool(*self.standard_arguments()), 1)
+
+        self.assertIn("could not write", self.stderr)
         self.assertEqual(self.merge.read_text(encoding="utf-8"), MERGE_CONFIGURATION)
         self.assertEqual(self.runtime.read_text(encoding="utf-8"), RUNTIME_CONFIGURATION)
 
