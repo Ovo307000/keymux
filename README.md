@@ -116,6 +116,19 @@ reaches `https://api.example.com/v1/responses`.
 Per route you can also set `upstream.api_key_header` (default `Authorization`)
 and `upstream.authorization_scheme` (default `Bearer`).
 
+**Verification probe.** `tools/verify_routes.py` asks each route for a `200` on
+the endpoint it declares, because upstreams differ: AnyRouter serves
+`GET /v1/models` and `POST /v1/responses` but answers `404` for
+`/v1/chat/completions`. The default probe is `POST /v1/chat/completions` with a
+streaming check; override it per route:
+
+```yaml
+    verify:
+      method: GET
+      path: /v1/models
+      streaming: false   # skip the incremental-SSE check for this route
+```
+
 ## Configure Clash Verge Rev
 
 Two nodes with **different public IPs** are required. Node names that differ do
@@ -180,9 +193,9 @@ It checks, against the real network:
 | Check | What it proves |
 | --- | --- |
 | health | `GET /health` answers `{"status":"ok"}` |
-| routes document | both routes are listed and no credential leaks |
+| routes document | every route is listed and no credential leaks |
 | egress public IPs | each egress proxy reports a public IP, and they differ |
-| non-streaming completion | every router key gets a real `200` from the upstream |
+| route answers | every route returns a real `200` on the endpoint it declares in its `verify` block |
 | streaming (SSE) | `text/event-stream` arrives in several chunks, not one buffer |
 | KeyMux 401 handling | no key and an unknown key are both answered `401` by KeyMux itself |
 | upstream error passthrough | an upstream `4xx` reaches the client unchanged, body and content type included |
@@ -265,6 +278,7 @@ it is the time to the first byte.
 ```
 keymux/
   config.py           configuration loading, ${VAR} expansion, validation
+  settings.py         the configuration model (routes, upstreams, egress, probes)
   routing.py          router key lookup (constant-time comparison)
   headers.py          header rewriting rules
   upstream.py         one HTTP client per route, streaming relay
@@ -275,7 +289,8 @@ keymux/
 tools/
   setup_clash_listeners.py   pin Mihomo listeners to fixed nodes
   clash_configuration.py     render and validate the managed listeners block
-  verify_routes.py           end-to-end verification of a running KeyMux
+  verify_routes.py           run the checks and report
+  route_checks.py            the individual gateway checks
   egress_probe.py            public IP behind each egress endpoint, no KeyMux involved
   egress_proof.py            router key -> real key + exit IP, over the real network
   network_probe.py           the public-IP probe shared by both tools above

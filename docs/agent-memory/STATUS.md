@@ -5,24 +5,38 @@
 KeyMux 1.0.0 - a single-entry, key-based egress router.
 
 * Entry point: `http://127.0.0.1:9000/v1` (loopback only).
-* Two live routes: `account-a` (egress `http://127.0.0.1:7893`, label
-  `node-a-hongkong`) and `account-b` (egress `http://127.0.0.1:7894`, label
-  `node-b-japan`). Both point at `https://tokenrhythm.studio`.
-* Clash Verge Rev has two pinned listeners written into the merge profile
+* Four live routes, each on its own Clash listener and therefore its own exit:
+
+  | route | upstream | egress label | proxy | exit IP |
+  | --- | --- | --- | --- | --- |
+  | `account-a` | tokenrhythm.studio | node-a-hongkong | 127.0.0.1:7893 | 104.234.20.81 |
+  | `account-b` | tokenrhythm.studio | node-b-japan | 127.0.0.1:7894 | 143.20.38.92 |
+  | `anyrouter-a` | anyrouter.top | node-c-taiwan | 127.0.0.1:7895 | 211.20.157.199 |
+  | `anyrouter-b` | anyrouter.top | node-d-singapore | 127.0.0.1:7896 | 67.159.52.193 |
+
+* The two `anyrouter-*` routes carry the two AnyRouter keys that opencodex also
+  holds (`providers.anyrouter` and `providers.anyrouter-2`), so the same key can
+  leave from a fixed, per-key IP. AgentRouter is deliberately not routed here.
+* Clash Verge Rev has the four pinned listeners written into the merge profile
   `m9eBW8npCB07.yaml` of the currently selected subscription
   (`RaxfGroTgUC5`, 小火箭加速v260810).
 * The main mixed port `7897` and the rest of the Clash configuration are
-  unchanged.
+  unchanged, and `~/.opencodex/config.json`, `~/.codex/config.toml` and the
+  AgentRouter provider were not modified.
 
 ## Verified (measured, not assumed)
 
-* Exit IP through `7893`: `104.234.20.81` (node `香港 01 HKIX`).
-* Exit IP through `7894`: `143.20.38.92` (node `日本 01 NTTドコモ`).
+* Exit IPs: `7893 -> 104.234.20.81`, `7894 -> 143.20.38.92`,
+  `7895 -> 211.20.157.199`, `7896 -> 67.159.52.193` (all distinct).
 * `python tools/verify_routes.py` - 9 of 9 checks passed, including the
   per-router-key proof that each key forwards its own real key and leaves from
   its own IP, sequentially and under concurrency.
-* `POST /v1/responses` works both streaming (SSE) and non-streaming.
-* `python -m unittest discover -s tests -t .` - 62 tests pass.
+* `POST /v1/responses` works both streaming (SSE) and non-streaming on the
+  TokenRhythm routes. AnyRouter's `/v1/responses` answers
+  `400 invalid codex request` for anything that is not a genuine Codex request
+  (documented upstream policy) - KeyMux forwards that body and status unchanged,
+  and `/v1/models` returns 200 through both AnyRouter routes.
+* `python -m unittest discover -s tests -t .` - 66 tests pass.
 * No router key or real key appears in `logs/`.
 
 ## Fixed after review

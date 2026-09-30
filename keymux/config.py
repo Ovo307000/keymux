@@ -6,14 +6,15 @@ base URL, and an egress proxy endpoint that pins the public exit IP.
 
 Every string value supports ``${ENVIRONMENT_VARIABLE}`` expansion so that real
 secrets never have to be written into the configuration file.
+
+The types this produces live in :mod:`keymux.settings` and are re-exported here.
 """
 
 from __future__ import annotations
 
-import os
 import math
+import os
 import re
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import urlsplit
@@ -21,68 +22,20 @@ from urllib.parse import urlsplit
 import yaml
 from dotenv import load_dotenv
 
+from .settings import (  # noqa: F401 - re-exported for the rest of the package
+    ConfigurationError,
+    EgressDefinition,
+    KeyMuxSettings,
+    PoolSettings,
+    RouteDefinition,
+    ServerSettings,
+    TimeoutSettings,
+    UpstreamDefinition,
+    VerifyDefinition,
+)
+
 ENVIRONMENT_VARIABLE_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
-
-
-class ConfigurationError(RuntimeError):
-    """Raised when the configuration cannot produce a usable setup."""
-
-
-@dataclass(frozen=True)
-class EgressDefinition:
-    """The Clash/Mihomo endpoint that decides the public exit IP."""
-
-    proxy: str | None
-    label: str
-
-
-@dataclass(frozen=True)
-class UpstreamDefinition:
-    """The real upstream the route forwards to."""
-
-    base_url: str
-    api_key: str
-    api_key_header: str = "Authorization"
-    authorization_scheme: str = "Bearer"
-
-
-@dataclass(frozen=True)
-class RouteDefinition:
-    """One router key, one upstream, one egress."""
-
-    name: str
-    incoming_key: str
-    upstream: UpstreamDefinition
-    egress: EgressDefinition
-
-
-@dataclass(frozen=True)
-class TimeoutSettings:
-    connect_seconds: float = 15.0
-    read_seconds: float = 600.0
-    write_seconds: float = 60.0
-    pool_seconds: float = 15.0
-
-
-@dataclass(frozen=True)
-class PoolSettings:
-    max_connections: int = 64
-    max_keepalive_connections: int = 16
-
-
-@dataclass(frozen=True)
-class ServerSettings:
-    host: str = "127.0.0.1"
-    port: int = 9000
-
-
-@dataclass(frozen=True)
-class KeyMuxSettings:
-    server: ServerSettings
-    routes: tuple[RouteDefinition, ...]
-    timeouts: TimeoutSettings
-    pool: PoolSettings
 
 
 def load_settings(
@@ -245,6 +198,22 @@ def _parse_route(name: str, body: Any, defaults: Mapping[str, str]) -> RouteDefi
             proxy=_optional_text(egress.get("proxy")),
             label=str(egress.get("label") or name),
         ),
+        verify=_parse_verify(body.get("verify"), name),
+    )
+
+
+def _parse_verify(raw: Any, route_name: str) -> VerifyDefinition:
+    if raw is None:
+        return VerifyDefinition()
+    if not isinstance(raw, Mapping):
+        raise ConfigurationError(f"route {route_name!r} has a 'verify' section that is not a mapping")
+    path = str(raw.get("path", VerifyDefinition.path))
+    if not path.startswith("/"):
+        raise ConfigurationError(f"route {route_name!r} has verify.path {path!r}; expected a path")
+    return VerifyDefinition(
+        method=str(raw.get("method", VerifyDefinition.method)).upper(),
+        path=path,
+        streaming=bool(raw.get("streaming", VerifyDefinition.streaming)),
     )
 
 

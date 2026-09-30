@@ -50,3 +50,10 @@ routes:
     egress:
       proxy: http://127.0.0.1:7894
       label: node-b
+    # Optional. Declares which endpoint the verification tool should probe,
+    # for upstreams that do not serve /v1/chat/completions (AnyRouter answers
+    # 404 there but serves GET /v1/models and POST /v1/responses).
+    verify:
+      method: GET
+      path: /v1/models
+      streaming: false

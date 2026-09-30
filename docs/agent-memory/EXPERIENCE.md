@@ -88,3 +88,21 @@ body has been read**, otherwise the poll consumes a body message.
 **`yaml.safe_dump` beats an f-string for writing node names into another
 program's configuration file.** Proxy names legitimately contain quotes, colons
 and `#`.
+
+## Relay upstreams (measured 2026-10-01)
+
+**AnyRouter (`https://anyrouter.top`) serves `/v1/models` and `/v1/responses`
+but returns 404 for `/v1/chat/completions` on every model.** So a route carrying
+an AnyRouter key cannot be verified with a chat completion; declare
+`verify: {method: GET, path: /v1/models, streaming: false}` for it. Reached
+`/v1/models` with 200 through `台湾 01 中華電信` and `新加坡 01 Singtel`.
+
+**AnyRouter's `/v1/responses` rejects anything that is not a genuine Codex
+request**, answering `400 invalid codex request` / `code invalid_responses_request`.
+Confirmed through KeyMux with a minimal JSON body. This is request-shape
+policy, not a key problem: the same key returns 200 on `/v1/models`.
+
+**`api.ipify.org` is flaky through `香港 01 HKIX`** (curl exit 0 with an empty
+body, or no response at all, while `anyrouter.top` answers 200 through the same
+listener). Treat one failed ipify probe as "retry", not as "the node is down" -
+which is why the egress probe retries three times.

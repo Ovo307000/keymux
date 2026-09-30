@@ -114,6 +114,48 @@ routes:
 
         self.assertIn("upstream", str(raised.exception))
 
+    def test_routes_get_a_default_verification_probe(self) -> None:
+        settings = load_settings(self.write(CONFIGURATION), ENVIRONMENT)
+
+        verify = settings.routes[0].verify
+        self.assertEqual(verify.method, "POST")
+        self.assertEqual(verify.path, "/v1/chat/completions")
+        self.assertTrue(verify.streaming)
+
+    def test_verify_block_overrides_the_probe(self) -> None:
+        configured = CONFIGURATION.replace(
+            "      api_key: ${REAL_API_KEY_B}\n",
+            "      api_key: ${REAL_API_KEY_B}\n"
+            "    verify:\n      method: get\n      path: /v1/models\n      streaming: false\n",
+        )
+
+        settings = load_settings(self.write(configured), ENVIRONMENT)
+        verify = {route.name: route.verify for route in settings.routes}["account-b"]
+
+        self.assertEqual(verify.method, "GET")
+        self.assertEqual(verify.path, "/v1/models")
+        self.assertFalse(verify.streaming)
+
+    def test_verify_with_a_relative_path_is_rejected(self) -> None:
+        configured = CONFIGURATION.replace(
+            "      api_key: ${REAL_API_KEY_B}\n",
+            "      api_key: ${REAL_API_KEY_B}\n    verify:\n      path: v1/models\n",
+        )
+
+        with self.assertRaises(ConfigurationError) as raised:
+            load_settings(self.write(configured), ENVIRONMENT)
+
+        self.assertIn("verify.path", str(raised.exception))
+
+    def test_verify_that_is_not_a_mapping_is_rejected(self) -> None:
+        configured = CONFIGURATION.replace(
+            "      api_key: ${REAL_API_KEY_B}\n",
+            "      api_key: ${REAL_API_KEY_B}\n    verify: /v1/models\n",
+        )
+
+        with self.assertRaises(ConfigurationError):
+            load_settings(self.write(configured), ENVIRONMENT)
+
     def test_relative_base_url_is_rejected_at_load_time(self) -> None:
         broken = CONFIGURATION.replace(
             "base_url: https://api.example.com\n", "base_url: api.example.com\n", 1
