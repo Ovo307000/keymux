@@ -26,9 +26,7 @@ from __future__ import annotations
 
 import argparse
 import os
-import re
 import shutil
-import subprocess
 import sys
 from dataclasses import dataclass
 from datetime import datetime
@@ -39,17 +37,15 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import mihomo_controller  # noqa: E402
+from clash_configuration import prepare_managed_content, render_managed_block  # noqa: E402
+from network_probe import looks_like_ipv4, probe_egress_ip  # noqa: E402
 
 VERGE_DATA_DIRECTORY_NAME = "io.github.clash-verge-rev.clash-verge-rev"
 RUNTIME_CONFIG_FILENAME = "clash-verge.yaml"
 PROFILES_INDEX_FILENAME = "profiles.yaml"
-MANAGED_BLOCK_MARKER = "# --- keymux managed listeners (generated, keep this block last) ---"
-TOP_LEVEL_LISTENERS_PATTERN = re.compile(r"(?m)^listeners:\s*$")
-EGRESS_PROBE_URL = "https://api.ipify.org"
-PROBE_TIMEOUT_SECONDS = 25
+RELOAD_SUCCESS_CODES = (200, 204)
 MIN_PORT = 1
 MAX_PORT = 65535
-RELOAD_SUCCESS_CODES = (200, 204)
 
 
 @dataclass(frozen=True)
@@ -81,21 +77,28 @@ def main() -> int:
     merged = prepare_managed_content(layout.merge_file, block)
     runtime = prepare_managed_content(layout.runtime_config, block)
 
-    backups = _backup_all(layout)
-    _write_text(layout.merge_file, merged)
-    _write_text(layout.runtime_config, runtime)
-    print("wrote listeners into the merge file and the runtime configuration")
+    status = apply_configuration(layout, merged, runtime, secret)
+    if status != 0 or arguments.no_verify:
+        return status
+    return _report_egress_ip(listeners)
 
-    status, body = mihomo_controller.reload_runtime_config(layout.runtime_config, secret)
-    if status not in RELOAD_SUCCESS_CODES:
-        print(f"mihomo rejected the configuration: HTTP {status} {body[:400]!r}", file=sys.stderr)
+
+def apply_configuration(layout: VergeLayout, merged: str, runtime: str, secret: str) -> int:
+    """Write both files, reload mihomo, and roll back if anything is rejected."""
+    backups = _backup_all(layout)
+    if not _write_both(layout, merged, runtime):
         _restore_and_reload(backups, layout.runtime_config, secret)
         return 1
-    print(f"mihomo reloaded the configuration (HTTP {status})")
 
-    if arguments.no_verify:
+    print("wrote listeners into the merge file and the runtime configuration")
+    status, body = mihomo_controller.reload_runtime_config(layout.runtime_config, secret)
+    if status in RELOAD_SUCCESS_CODES:
+        print(f"mihomo reloaded the configuration (HTTP {status})")
         return 0
-    return _report_egress_ip(listeners)
+
+    print(f"mihomo rejected the configuration: HTTP {status} {body[:400]!r}", file=sys.stderr)
+    _restore_and_reload(backups, layout.runtime_config, secret)
+    return 1
 
 
 def locate_verge_layout() -> VergeLayout:
@@ -111,7 +114,8 @@ def locate_verge_layout() -> VergeLayout:
 
 
 def _current_merge_filename(profiles_index: Path) -> str:
-    document = _load_yaml(profiles_index)
+    with profiles_index.open(encoding="utf-8") as handle:
+        document = yaml.safe_load(handle)
     current_uid = document["current"]
     items = {item["uid"]: item for item in document["items"]}
     if current_uid not in items:
@@ -127,68 +131,23 @@ def _current_merge_filename(profiles_index: Path) -> str:
     return items[merge_uid]["file"]
 
 
-def _load_yaml(path: Path) -> dict:
-    with path.open(encoding="utf-8") as handle:
-        return yaml.safe_load(handle)
-
-
-def render_managed_block(listeners: tuple[Listener, ...]) -> str:
-    """Render the block through a YAML dumper, so node names cannot break it."""
-    document = {
-        "listeners": [
-            {
-                "name": listener.name,
-                "type": "mixed",
-                "listen": "127.0.0.1",
-                "port": listener.port,
-                "proxy": listener.node,
-            }
-            for listener in listeners
-        ]
-    }
-    dumped = yaml.safe_dump(
-        document, allow_unicode=True, sort_keys=False, default_flow_style=False, width=1000
-    )
-    return f"{MANAGED_BLOCK_MARKER}\n{dumped}"
-
-
-def prepare_managed_content(path: Path, block: str) -> str:
-    """Return the new file content, or refuse before anything is written."""
-    existing = path.read_text(encoding="utf-8") if path.is_file() else ""
-    marker_index = existing.find(MANAGED_BLOCK_MARKER)
-    head = (existing[:marker_index] if marker_index != -1 else existing).rstrip("\n")
-    if TOP_LEVEL_LISTENERS_PATTERN.search(head):
-        raise SystemExit(
-            f"refusing to write {path}: it already declares a top-level 'listeners:' section "
-            "outside the managed block. Merge the two by hand first."
-        )
-    content = f"{head}\n\n{block}" if head else block
-    _require_parseable(content, path)
-    return content
-
-
-def _require_parseable(content: str, path: Path) -> None:
+def _write_both(layout: VergeLayout, merged: str, runtime: str) -> bool:
     try:
-        document = yaml.safe_load(content)
-    except yaml.YAMLError as error:
-        raise SystemExit(f"refusing to write {path}: the result is not valid YAML ({error})") from error
-    if not isinstance(document, dict) or not isinstance(document.get("listeners"), list):
-        raise SystemExit(f"refusing to write {path}: the result has no usable 'listeners' list")
+        layout.merge_file.write_text(merged, encoding="utf-8", newline="\n")
+        layout.runtime_config.write_text(runtime, encoding="utf-8", newline="\n")
+    except OSError as error:
+        print(f"could not write the configuration: {error}", file=sys.stderr)
+        return False
+    return True
 
 
-def _write_text(path: Path, content: str) -> None:
-    path.write_text(content, encoding="utf-8", newline="\n")
+def _backup_all(layout: VergeLayout) -> list[tuple[Path, Path | None]]:
+    return [(path, _backup(path)) for path in (layout.merge_file, layout.runtime_config)]
 
 
-def _backup_all(layout: VergeLayout) -> list[tuple[Path, Path]]:
-    return [
-        (path, _backup(path))
-        for path in (layout.merge_file, layout.runtime_config)
-        if path.is_file()
-    ]
-
-
-def _backup(path: Path) -> Path:
+def _backup(path: Path) -> Path | None:
+    if not path.is_file():
+        return None
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     backup = path.with_suffix(path.suffix + f".keymux-{stamp}.bak")
     shutil.copy2(path, backup)
@@ -196,14 +155,24 @@ def _backup(path: Path) -> Path:
 
 
 def _restore_and_reload(
-    backups: list[tuple[Path, Path]], runtime_config: Path, secret: str
+    backups: list[tuple[Path, Path | None]], runtime_config: Path, secret: str
 ) -> None:
+    """Put back exactly what was there, including "there was no file"."""
     for original, backup in backups:
-        shutil.copy2(backup, original)
-    mihomo_controller.reload_runtime_config(runtime_config, secret)
-    print("restored the previous configuration from:", file=sys.stderr)
+        if backup is None:
+            original.unlink(missing_ok=True)
+        else:
+            shutil.copy2(backup, original)
+
+    status, body = mihomo_controller.reload_runtime_config(runtime_config, secret)
+    print("restored the previous configuration:", file=sys.stderr)
     for _, backup in backups:
-        print(f"  {backup}", file=sys.stderr)
+        print(f"  {backup if backup else '<file removed again>'}", file=sys.stderr)
+    if status not in RELOAD_SUCCESS_CODES:
+        print(
+            f"the restored configuration was also rejected: HTTP {status} {body[:200]!r}",
+            file=sys.stderr,
+        )
 
 
 def _require_nodes_present(nodes: list[str], secret: str) -> None:
@@ -227,36 +196,15 @@ def _report_egress_ip(listeners: tuple[Listener, ...]) -> int:
     failures = 0
     observed: dict[str, str] = {}
     for listener in listeners:
-        address = probe_egress(listener)
+        address = probe_egress_ip(f"http://127.0.0.1:{listener.port}")
         observed[listener.node] = address
         print(f"{listener.port}  {listener.node}  ->  {address}")
-        if not _looks_like_ip(address):
+        if not looks_like_ipv4(address):
             failures += 1
     if len(set(observed.values())) < len(listeners):
         print("warning: listeners do not all show a distinct public IP", file=sys.stderr)
         failures += 1
     return 1 if failures else 0
-
-
-def probe_egress(listener: Listener) -> str:
-    process = subprocess.run(
-        [
-            "curl.exe", "-s", "--max-time", str(PROBE_TIMEOUT_SECONDS),
-            "-x", f"http://127.0.0.1:{listener.port}", EGRESS_PROBE_URL,
-        ],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
-    return (process.stdout or "").strip() or f"<probe failed: {process.stderr.strip()[:80]}>"
-
-
-def _looks_like_ip(value: str) -> bool:
-    parts = value.split(".")
-    if len(parts) != 4:
-        return False
-    return all(part.isdigit() and 0 <= int(part) <= 255 for part in parts)
 
 
 def _parse_listeners(raw: list[list[str]] | None) -> tuple[Listener, ...]:
@@ -268,6 +216,8 @@ def _parse_listeners(raw: list[list[str]] | None) -> tuple[Listener, ...]:
             raise SystemExit(f"malformed --listener {parts!r}; expected NAME PORT NODE")
         if not parts[0].strip():
             raise SystemExit("listener names must not be empty")
+        if not " ".join(parts[2:]).strip():
+            raise SystemExit("listener node names must not be empty")
         listeners.append(Listener(name=parts[0], port=_port(parts[1]), node=" ".join(parts[2:])))
     if len({listener.port for listener in listeners}) != len(listeners):
         raise SystemExit("listener ports must be unique")

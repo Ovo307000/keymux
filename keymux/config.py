@@ -11,6 +11,7 @@ secrets never have to be written into the configuration file.
 from __future__ import annotations
 
 import os
+import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -159,8 +160,10 @@ def _positive_number(source: Mapping[str, Any], key: str, fallback: float) -> fl
         raise ConfigurationError(
             f"upstream_defaults.{key} must be a number, got {source[key]!r}"
         ) from error
-    if value <= 0:
-        raise ConfigurationError(f"upstream_defaults.{key} must be greater than zero, got {value}")
+    if not math.isfinite(value) or value <= 0:
+        raise ConfigurationError(
+            f"upstream_defaults.{key} must be a finite number greater than zero, got {source[key]!r}"
+        )
     return value
 
 

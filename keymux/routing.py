@@ -15,6 +15,7 @@ from .errors import InvalidApiKeyError, MissingApiKeyError
 AUTHORIZATION_HEADER = "authorization"
 API_KEY_HEADER = "x-api-key"
 AUTHORIZATION_SCHEME = "bearer"
+SCHEME_NAMES = frozenset({"bearer", "basic", "digest", "token", "apikey", "api-key"})
 
 
 class RouteRegistry:
@@ -85,7 +86,7 @@ def _strip_authorization_scheme(authorization: str | None) -> str | None:
         if parts[0].lower() == AUTHORIZATION_SCHEME:
             return parts[1].strip() or None
         return None
-    if parts[0].lower() == AUTHORIZATION_SCHEME:
-        # A bare "Bearer" carries no key; report a missing key, not an unknown one.
+    if parts[0].lower() in SCHEME_NAMES:
+        # A scheme with no key carries no key; report it as missing, not unknown.
         return None
     return parts[0].strip() or None

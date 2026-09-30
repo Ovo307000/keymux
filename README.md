@@ -274,9 +274,11 @@ keymux/
   main.py             application factory, endpoints, entry point
 tools/
   setup_clash_listeners.py   pin Mihomo listeners to fixed nodes
+  clash_configuration.py     render and validate the managed listeners block
   verify_routes.py           end-to-end verification of a running KeyMux
   egress_probe.py            public IP behind each egress endpoint, no KeyMux involved
   egress_proof.py            router key -> real key + exit IP, over the real network
+  network_probe.py           the public-IP probe shared by both tools above
   mihomo_controller.py       named-pipe client for the Mihomo API
   check_result.py            the shape of one verification result
 tests/                       unit and integration tests (stdlib unittest)
