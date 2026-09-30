@@ -130,9 +130,13 @@ the native models; `ocx service start` restores both. The `model = ...` line
 survives, and the file came back **byte-identical** to the pre-change backup.
 Verify that with `Compare-Object` rather than trusting it.
 
-**`ocx models add <provider> <model> --display-name "<label>"` is how a model
-gets a human label in Codex's picker** (`--display-name` must not contain a
-slash). Without it the picker shows the raw `provider/model` slug.
+**`ocx models add <provider> <model> --display-name "<label>"` replaces the
+model's name in Codex's picker, and `--display-name` refuses a slash.**
+`provider/model` is the form the picker should show, so the way to keep it is to
+**not** pass `--display-name` at all. To undo one, `ocx models remove
+<provider>/<modelId> --yes` - the model survives (the upstream advertises it)
+and the name falls back to the default. Same rule recorded as 铁律 16 in the
+`relay-routing` skill.
 
 **A new provider pulls in the upstream's entire model list.** Adding a provider
 pointed at AnyRouter appended 16 models per provider, including the blocked

@@ -19,10 +19,13 @@ KeyMux 1.0.0 - a single-entry, key-based egress router.
   leave from a fixed, per-key IP. AgentRouter is deliberately not routed here.
 * Codex reaches KeyMux through opencodex, which gained two extra providers:
 
-  | opencodex provider | base URL | Codex model id | labelled |
-  | --- | --- | --- | --- |
-  | `keymux-local-relay-a` | `http://127.0.0.1:9000/v1` | `keymux-local-relay-a/gpt-6-astra` | 本地中转 A（AnyRouter key1） |
-  | `keymux-local-relay-b` | `http://127.0.0.1:9000/v1` | `keymux-local-relay-b/gpt-6-astra` | 本地中转 B（AnyRouter key2） |
+  | opencodex provider | base URL | Codex model id (and picker name) |
+  | --- | --- | --- |
+  | `keymux-local-relay-a` | `http://127.0.0.1:9000/v1` | `keymux-local-relay-a/gpt-6-astra` |
+  | `keymux-local-relay-b` | `http://127.0.0.1:9000/v1` | `keymux-local-relay-b/gpt-6-astra` |
+
+  Model names stay in the `provider/model` form: `ocx models add` must not be
+  given `--display-name`, which would replace that name with an invented label.
 
   Both are `adapter=openai-responses` with `allowPrivateNetwork`, each trusting
   one KeyMux router key, and all other models those providers pulled in are
