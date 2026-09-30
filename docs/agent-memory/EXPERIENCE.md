@@ -130,13 +130,40 @@ the native models; `ocx service start` restores both. The `model = ...` line
 survives, and the file came back **byte-identical** to the pre-change backup.
 Verify that with `Compare-Object` rather than trusting it.
 
+**Registering a model without a context window leaves it at the gateway default
+(128,000 here), and that survives fixes to other things.**
+Removing a custom model registration to fix its display name also drops the
+`contextWindow` it carried, so the model silently fell to 128k while the same
+upstream model on the sibling providers was 1,000,000. Check the value after any
+`ocx models remove`, not just after `add`.
+
 **`ocx models add <provider> <model> --display-name "<label>"` replaces the
 model's name in Codex's picker, and `--display-name` refuses a slash.**
 `provider/model` is the form the picker should show, so the way to keep it is to
-**not** pass `--display-name` at all. To undo one, `ocx models remove
-<provider>/<modelId> --yes` - the model survives (the upstream advertises it)
-and the name falls back to the default. Same rule recorded as 铁律 16 in the
-`relay-routing` skill.
+**not** pass `--display-name` at all - an `add` with `--context-window` only
+leaves the name as the default slug. To undo a label, `ocx models remove
+<provider>/<modelId> --yes`: the model survives (the upstream advertises it) and
+the name falls back to the default. Recorded as 铁律 16 in the `relay-routing`
+skill.
+
+**AnyRouter's `/v1/models` advertises no `context_length` at all** (the entries
+carry only `id`/`object`/`created`/`owned_by`/`permission`/`root`/`parent`).
+TokenRhythm's does. So "what does this model really support" has to be answered
+per upstream: the advertised field when present, otherwise the value the same
+model already runs at on another provider here (AnyRouter `gpt-6-astra` is
+1,000,000 on `anyrouter`, `anyrouter-2` and `agentrouter`).
+
+**Both context values must be set**: `--context-window` on the model and
+`ocx models context provider <name> on --value N` for the provider cap.
+Setting only one leaves the other clamping the model.
+
+**`scripts/doctor.ps1` used to be blind to any provider whose name did not match
+`anyrouter|agentrouter|tokenrhythm`.** Both its connectivity loop and its
+"模型与上下文" listing filtered on that pattern, so the two `keymux-local-relay-*`
+providers were checked by nothing - which is how a 128k model went unnoticed.
+Both filters now include `keymux`, and the low-context warning names the
+offending slugs and prints the two commands that fix them. When a new provider
+namespace is added, widen those filters in the same change.
 
 **A new provider pulls in the upstream's entire model list.** Adding a provider
 pointed at AnyRouter appended 16 models per provider, including the blocked

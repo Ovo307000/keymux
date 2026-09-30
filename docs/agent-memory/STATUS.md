@@ -26,6 +26,10 @@ KeyMux 1.0.0 - a single-entry, key-based egress router.
 
   Model names stay in the `provider/model` form: `ocx models add` must not be
   given `--display-name`, which would replace that name with an invented label.
+  Both carry `context_window = 1,000,000` (auto-compact 900,000) and a matching
+  provider cap - the same value `gpt-6-astra` already uses on `anyrouter`,
+  `anyrouter-2` and `agentrouter`. `scripts/doctor.ps1` covers both providers
+  now; `FAIL: 0`.
 
   Both are `adapter=openai-responses` with `allowPrivateNetwork`, each trusting
   one KeyMux router key, and all other models those providers pulled in are
