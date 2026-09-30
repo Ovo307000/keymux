@@ -8,6 +8,7 @@ after the client went away.
 from __future__ import annotations
 
 import json
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -47,6 +48,13 @@ class MockUpstreamServer(ThreadingHTTPServer):
     def __init__(self, address, state: UpstreamState) -> None:
         super().__init__(address, MockUpstreamHandler)
         self.state = state
+
+    def handle_error(self, request, client_address) -> None:
+        """A client that hangs up mid-request is the thing under test, not an error."""
+        error = sys.exc_info()[1]
+        if isinstance(error, (ConnectionError, OSError)):
+            return
+        super().handle_error(request, client_address)
 
 
 class MockUpstreamHandler(BaseHTTPRequestHandler):
@@ -133,7 +141,7 @@ class MockUpstreamHandler(BaseHTTPRequestHandler):
         for name, value in (extra_headers or {}).items():
             self.send_header(name, value)
         self.end_headers()
-        self.wfile.write(raw)
+        self._write(raw)
 
     def _send_event_stream(self, event_count: int, delay_seconds: float) -> None:
         self.send_response(200)
@@ -142,13 +150,16 @@ class MockUpstreamHandler(BaseHTTPRequestHandler):
         self.send_header("Connection", "close")
         self.end_headers()
         self.close_connection = True
+        for index in range(event_count):
+            self._write(f'data: {{"index": {index}}}\n\n'.encode("utf-8"))
+            if delay_seconds:
+                time.sleep(delay_seconds)
+        self._write(b"data: [DONE]\n\n")
+
+    def _write(self, payload: bytes) -> None:
+        """Write to the client, and record it when the client is already gone."""
         try:
-            for index in range(event_count):
-                self.wfile.write(f'data: {{"index": {index}}}\n\n'.encode("utf-8"))
-                self.wfile.flush()
-                if delay_seconds:
-                    time.sleep(delay_seconds)
-            self.wfile.write(b"data: [DONE]\n\n")
+            self.wfile.write(payload)
             self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError, OSError):
             self.server.state.mark_client_gone()

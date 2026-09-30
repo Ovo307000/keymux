@@ -81,8 +81,11 @@ def _strip_authorization_scheme(authorization: str | None) -> str | None:
     if not authorization:
         return None
     parts = authorization.strip().split(None, 1)
-    if len(parts) == 2 and parts[0].lower() == AUTHORIZATION_SCHEME:
-        return parts[1].strip() or None
-    if len(parts) == 1:
-        return parts[0].strip() or None
-    return None
+    if len(parts) == 2:
+        if parts[0].lower() == AUTHORIZATION_SCHEME:
+            return parts[1].strip() or None
+        return None
+    if parts[0].lower() == AUTHORIZATION_SCHEME:
+        # A bare "Bearer" carries no key; report a missing key, not an unknown one.
+        return None
+    return parts[0].strip() or None

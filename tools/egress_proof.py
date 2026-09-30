@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import socket
 import subprocess
 import sys
 import tempfile
@@ -32,7 +33,6 @@ from check_result import CheckResult  # noqa: E402
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 PROOF_UPSTREAM = "https://httpbin.org/anything"
-PROOF_PORT = 9001
 PROOF_STARTUP_SECONDS = 25.0
 PROOF_REQUESTS_PER_ROUTE = 4
 HTTP_TIMEOUT_SECONDS = 90.0
@@ -40,10 +40,12 @@ HTTP_TIMEOUT_SECONDS = 90.0
 
 async def run(settings, requests_per_route: int = PROOF_REQUESTS_PER_ROUTE) -> CheckResult:
     """Start the throwaway instance, probe every route, and return a CheckResult."""
+    port = _free_port()
     with tempfile.TemporaryDirectory() as directory:
         config_path = Path(directory) / "egress-proof.yaml"
         config_path.write_text(
-            yaml.safe_dump(_proof_configuration(settings), allow_unicode=True), encoding="utf-8"
+            yaml.safe_dump(_proof_configuration(settings, port), allow_unicode=True),
+            encoding="utf-8",
         )
         process = subprocess.Popen(
             [sys.executable, "-m", "keymux.main"],
@@ -54,7 +56,9 @@ async def run(settings, requests_per_route: int = PROOF_REQUESTS_PER_ROUTE) -> C
             stderr=subprocess.DEVNULL,
         )
         try:
-            sequential, concurrent = await _probe_everything(process, settings, requests_per_route)
+            sequential, concurrent = await _probe_everything(
+                process, settings, port, requests_per_route
+            )
         finally:
             process.terminate()
             process.wait(timeout=10)
@@ -62,9 +66,9 @@ async def run(settings, requests_per_route: int = PROOF_REQUESTS_PER_ROUTE) -> C
     return _judge(sequential, concurrent)
 
 
-async def _probe_everything(process, settings, requests_per_route: int):
+async def _probe_everything(process, settings, port: int, requests_per_route: int):
     async with httpx.AsyncClient(
-        base_url=f"http://127.0.0.1:{PROOF_PORT}", trust_env=False, timeout=HTTP_TIMEOUT_SECONDS
+        base_url=f"http://127.0.0.1:{port}", trust_env=False, timeout=HTTP_TIMEOUT_SECONDS
     ) as client:
         if not await _wait_until_healthy(client):
             return None, None
@@ -136,33 +140,46 @@ async def _wait_until_healthy(client: httpx.AsyncClient) -> bool:
 
 def _proof_environment(settings) -> dict:
     environment = {}
-    for route in settings.routes:
-        token = _environment_token(route.name)
+    for route, token in _proof_tokens(settings):
         environment[f"PROOF_INCOMING_{token}"] = route.incoming_key
         environment[f"PROOF_UPSTREAM_{token}"] = route.upstream.api_key
     return environment
 
 
-def _proof_configuration(settings) -> dict:
+def _proof_configuration(settings, port: int) -> dict:
     return {
-        "server": {"host": "127.0.0.1", "port": PROOF_PORT, "allow_non_loopback": False},
+        "server": {"host": "127.0.0.1", "port": port, "allow_non_loopback": False},
         "routes": {
             route.name: {
-                "incoming_key": f"${{PROOF_INCOMING_{_environment_token(route.name)}}}",
+                "incoming_key": f"${{PROOF_INCOMING_{token}}}",
                 "upstream": {
                     "base_url": PROOF_UPSTREAM,
-                    "api_key": f"${{PROOF_UPSTREAM_{_environment_token(route.name)}}}",
+                    "api_key": f"${{PROOF_UPSTREAM_{token}}}",
                 },
                 "egress": {"proxy": route.egress.proxy, "label": route.egress.label},
             }
-            for route in settings.routes
+            for route, token in _proof_tokens(settings)
         },
     }
+
+
+def _proof_tokens(settings) -> list[tuple]:
+    """One unique variable-name token per route: two route names can sanitise alike."""
+    return [
+        (route, f"{index}_{_environment_token(route.name)}")
+        for index, route in enumerate(settings.routes)
+    ]
 
 
 def _environment_token(name: str) -> str:
     """Environment variable names allow only [A-Za-z0-9_], route names do not."""
     return "".join(character.upper() if character.isalnum() else "_" for character in name)
+
+
+def _free_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
 
 
 def _parse_json(text: str):

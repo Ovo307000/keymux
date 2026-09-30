@@ -15,8 +15,6 @@ import httpx
 from .config import PoolSettings, RouteDefinition, TimeoutSettings
 from .errors import translate_transport_error
 
-STREAM_CHUNK_SIZE = 8192
-
 
 class RouteUpstream:
     """One route's private channel to its upstream."""

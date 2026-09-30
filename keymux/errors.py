@@ -60,15 +60,25 @@ class UpstreamProtocolError(KeyMuxError):
     error_type = ERROR_TYPE_UPSTREAM
 
 
+class ClientDisconnectedError(KeyMuxError):
+    """The client went away before the upstream answered; nobody will read this."""
+
+    status_code = 499
+    code = "client_disconnected"
+    error_type = ERROR_TYPE_INVALID_REQUEST
+
+
 def translate_transport_error(error: httpx.HTTPError, egress_label: str) -> KeyMuxError:
-    """Turn an httpx failure into the status code the client should see."""
-    detail = f"{type(error).__name__}: {error}"
+    """Turn an httpx failure into the status code the client should see.
+
+    Only the exception class and the egress label are carried into the message.
+    ``str(error)`` is deliberately dropped: httpx embeds the request URL and, for
+    proxy failures, the proxy URL, and that text would reach both the client and
+    the log.
+    """
+    reason = type(error).__name__
     if isinstance(error, httpx.TimeoutException):
-        return UpstreamTimeoutError(
-            f"upstream timed out through egress {egress_label!r} ({detail})"
-        )
+        return UpstreamTimeoutError(f"upstream timed out through egress {egress_label} ({reason})")
     if isinstance(error, httpx.TransportError):
-        return UpstreamConnectionError(
-            f"upstream unreachable through egress {egress_label!r} ({detail})"
-        )
-    return UpstreamProtocolError(f"upstream request failed through egress {egress_label!r} ({detail})")
+        return UpstreamConnectionError(f"upstream unreachable through egress {egress_label} ({reason})")
+    return UpstreamProtocolError(f"upstream request failed through egress {egress_label} ({reason})")

@@ -15,6 +15,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
+from urllib.parse import urlsplit
 
 import yaml
 from dotenv import load_dotenv
@@ -135,29 +136,44 @@ def _expand_string(value: str, environment: Mapping[str, str]) -> str:
 
 def _parse_timeouts(defaults: Mapping[str, Any]) -> TimeoutSettings:
     return TimeoutSettings(
-        connect_seconds=_number(defaults, "connect_timeout_seconds", 15.0),
-        read_seconds=_number(defaults, "read_timeout_seconds", 600.0),
-        write_seconds=_number(defaults, "write_timeout_seconds", 60.0),
-        pool_seconds=_number(defaults, "pool_timeout_seconds", 15.0),
+        connect_seconds=_positive_number(defaults, "connect_timeout_seconds", 15.0),
+        read_seconds=_positive_number(defaults, "read_timeout_seconds", 600.0),
+        write_seconds=_positive_number(defaults, "write_timeout_seconds", 60.0),
+        pool_seconds=_positive_number(defaults, "pool_timeout_seconds", 15.0),
     )
 
 
 def _parse_pool(defaults: Mapping[str, Any]) -> PoolSettings:
     return PoolSettings(
-        max_connections=int(defaults.get("max_connections", 64)),
-        max_keepalive_connections=int(defaults.get("max_keepalive_connections", 16)),
+        max_connections=_positive_integer(defaults, "max_connections", 64),
+        max_keepalive_connections=_positive_integer(defaults, "max_keepalive_connections", 16),
     )
 
 
-def _number(source: Mapping[str, Any], key: str, fallback: float) -> float:
+def _positive_number(source: Mapping[str, Any], key: str, fallback: float) -> float:
     if key not in source:
         return fallback
-    return float(source[key])
+    try:
+        value = float(source[key])
+    except (TypeError, ValueError) as error:
+        raise ConfigurationError(
+            f"upstream_defaults.{key} must be a number, got {source[key]!r}"
+        ) from error
+    if value <= 0:
+        raise ConfigurationError(f"upstream_defaults.{key} must be greater than zero, got {value}")
+    return value
+
+
+def _positive_integer(source: Mapping[str, Any], key: str, fallback: int) -> int:
+    value = _positive_number(source, key, fallback)
+    if value != int(value):
+        raise ConfigurationError(f"upstream_defaults.{key} must be a whole number, got {value}")
+    return int(value)
 
 
 def _parse_server(raw: Mapping[str, Any]) -> ServerSettings:
     host = str(raw.get("host", "127.0.0.1"))
-    port = int(raw.get("port", 9000))
+    port = _port(raw.get("port", 9000), "server.port")
     allow_non_loopback = bool(raw.get("allow_non_loopback", False))
     if host not in LOOPBACK_HOSTS and not allow_non_loopback:
         raise ConfigurationError(
@@ -165,6 +181,16 @@ def _parse_server(raw: Mapping[str, Any]) -> ServerSettings:
             "to expose KeyMux beyond this machine"
         )
     return ServerSettings(host=host, port=port)
+
+
+def _port(value: Any, field: str) -> int:
+    try:
+        port = int(value)
+    except (TypeError, ValueError) as error:
+        raise ConfigurationError(f"{field} must be an integer, got {value!r}") from error
+    if not 1 <= port <= 65535:
+        raise ConfigurationError(f"{field} must be between 1 and 65535, got {port}")
+    return port
 
 
 def _parse_routes(raw: Any, environment: Mapping[str, str]) -> tuple[RouteDefinition, ...]:
@@ -205,7 +231,7 @@ def _parse_route(name: str, body: Any, defaults: Mapping[str, str]) -> RouteDefi
         name=name,
         incoming_key=_required_text(body, "incoming_key", name),
         upstream=UpstreamDefinition(
-            base_url=_required_text(upstream, "base_url", name).rstrip("/"),
+            base_url=_validate_base_url(_required_text(upstream, "base_url", name), name),
             api_key=_required_text(upstream, "api_key", name),
             api_key_header=str(upstream.get("api_key_header", defaults["api_key_header"])),
             authorization_scheme=str(
@@ -217,6 +243,17 @@ def _parse_route(name: str, body: Any, defaults: Mapping[str, str]) -> RouteDefi
             label=str(egress.get("label") or name),
         ),
     )
+
+
+def _validate_base_url(value: str, route_name: str) -> str:
+    """Reject a base URL that would only fail later, inside a request."""
+    base_url = value.rstrip("/")
+    parts = urlsplit(base_url)
+    if parts.scheme not in {"http", "https"} or not parts.netloc:
+        raise ConfigurationError(
+            f"route {route_name!r} has base_url {value!r}; expected an absolute http(s) URL"
+        )
+    return base_url
 
 
 def _required_text(source: Mapping[str, Any], key: str, route_name: str) -> str:

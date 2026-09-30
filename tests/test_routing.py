@@ -63,6 +63,16 @@ class RoutingTests(unittest.TestCase):
                 with self.assertRaises(InvalidApiKeyError):
                     self.registry.resolve_from_headers(f"Bearer {presented}", None)
 
+    def test_scheme_without_a_token_counts_as_missing_not_unknown(self) -> None:
+        for presented in ("Bearer", "Bearer ", "Bearer   "):
+            with self.subTest(presented=presented):
+                with self.assertRaises(MissingApiKeyError):
+                    self.registry.resolve_from_headers(presented, None)
+
+    def test_a_different_scheme_is_not_treated_as_a_router_key(self) -> None:
+        with self.assertRaises(MissingApiKeyError):
+            self.registry.resolve_from_headers("Basic kmx_a_secret-a", None)
+
     def test_describe_never_exposes_credentials(self) -> None:
         rendered = repr(self.registry.describe())
 

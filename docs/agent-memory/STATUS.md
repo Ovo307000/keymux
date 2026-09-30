@@ -18,12 +18,24 @@ KeyMux 1.0.0 - a single-entry, key-based egress router.
 
 * Exit IP through `7893`: `104.234.20.81` (node `香港 01 HKIX`).
 * Exit IP through `7894`: `143.20.38.92` (node `日本 01 NTTドコモ`).
-* `python tools/verify_routes.py` - 8 of 8 checks passed, including the
+* `python tools/verify_routes.py` - 9 of 9 checks passed, including the
   per-router-key proof that each key forwards its own real key and leaves from
   its own IP, sequentially and under concurrency.
 * `POST /v1/responses` works both streaming (SSE) and non-streaming.
-* `python -m unittest discover -s tests -t .` - 39 tests pass.
+* `python -m unittest discover -s tests -t .` - 51 tests pass.
 * No router key or real key appears in `logs/`.
+
+## Fixed after review
+
+* A non-ASCII router key reached `secrets.compare_digest` as a `str` and raised
+  `TypeError`, turning an unauthenticated request into a 500. Keys are now
+  compared as UTF-8 bytes.
+* `httpx` exception text (which embeds the request URL and the proxy URL) was
+  echoed to the client and the log. Only the exception class name is kept now.
+* `tools/setup_clash_listeners.py` could write a Clash configuration that does
+  not start, and only discovered it after overwriting both files. It now
+  validates nodes, ports, the resulting YAML and pre-existing `listeners:`
+  before writing, and restores backups on a rejected reload.
 
 ## Open items
 

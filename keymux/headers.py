@@ -21,6 +21,7 @@ HOP_BY_HOP_HEADERS = frozenset(
         "keep-alive",
         "proxy-authenticate",
         "proxy-authorization",
+        "proxy-connection",
         "te",
         "trailer",
         "trailers",

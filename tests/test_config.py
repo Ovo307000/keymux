@@ -114,6 +114,40 @@ routes:
 
         self.assertIn("upstream", str(raised.exception))
 
+    def test_relative_base_url_is_rejected_at_load_time(self) -> None:
+        broken = CONFIGURATION.replace(
+            "base_url: https://api.example.com\n", "base_url: api.example.com\n", 1
+        )
+
+        with self.assertRaises(ConfigurationError) as raised:
+            load_settings(self.write(broken), ENVIRONMENT)
+
+        self.assertIn("base_url", str(raised.exception))
+
+    def test_non_numeric_timeout_is_rejected_at_load_time(self) -> None:
+        broken = "upstream_defaults:\n  read_timeout_seconds: soon\n" + CONFIGURATION
+
+        with self.assertRaises(ConfigurationError) as raised:
+            load_settings(self.write(broken), ENVIRONMENT)
+
+        self.assertIn("read_timeout_seconds", str(raised.exception))
+
+    def test_zero_connection_limit_is_rejected_at_load_time(self) -> None:
+        broken = "upstream_defaults:\n  max_connections: 0\n" + CONFIGURATION
+
+        with self.assertRaises(ConfigurationError) as raised:
+            load_settings(self.write(broken), ENVIRONMENT)
+
+        self.assertIn("max_connections", str(raised.exception))
+
+    def test_port_out_of_range_is_rejected_at_load_time(self) -> None:
+        broken = CONFIGURATION.replace("port: 9000", "port: 99999")
+
+        with self.assertRaises(ConfigurationError) as raised:
+            load_settings(self.write(broken), ENVIRONMENT)
+
+        self.assertIn("server.port", str(raised.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

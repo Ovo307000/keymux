@@ -42,6 +42,12 @@ DEFAULT_MODEL = "deepseek-flash"
 DEFAULT_BASE_URL = "http://127.0.0.1:9000"
 HTTP_TIMEOUT_SECONDS = 90.0
 
+# Error codes KeyMux itself produces; anything else in a 5xx body came from the
+# upstream and is a correct pass-through, not a KeyMux defect.
+KEYMUX_FAILURE_CODES = frozenset(
+    {"upstream_connection_failed", "upstream_timeout", "upstream_protocol_error", "internal_error"}
+)
+
 
 def main() -> int:
     arguments = parse_arguments()
@@ -202,16 +208,32 @@ async def check_concurrency(
     responses = await asyncio.gather(
         *_concurrent_calls(client, settings, model), return_exceptions=True
     )
+    failures = [response for response in responses if _is_keymux_failure(response)]
     statuses = [getattr(response, "status_code", 0) for response in responses]
-    failures = [status for status in statuses if status >= 500 or status == 0]
-    failures += [response for response in responses if isinstance(response, Exception)]
+    upstream_errors = [status for status in statuses if 500 <= status < 600]
     detail = (
-        f"{len(statuses)} requests, {len(failures)} failures, "
-        f"upstream_rate_limited={statuses.count(429)}"
+        f"{len(statuses)} requests, {len(failures)} KeyMux failures, "
+        f"upstream_5xx={len(upstream_errors)}, upstream_rate_limited={statuses.count(429)}"
     )
     if failures:
-        detail += f" {failures[:4]}"
+        detail += f" {[_describe_failure(f) for f in failures[:4]]}"
     return CheckResult("concurrency", not failures, detail)
+
+
+def _is_keymux_failure(response) -> bool:
+    """An upstream 5xx that travelled back untouched is not a KeyMux failure."""
+    if isinstance(response, Exception):
+        return True
+    if response.status_code < 500:
+        return False
+    body = _parse_json(response.text) or {}
+    return (body.get("error") or {}).get("code") in KEYMUX_FAILURE_CODES
+
+
+def _describe_failure(response) -> str:
+    if isinstance(response, Exception):
+        return repr(response)[:80]
+    return f"{response.status_code}:{response.text[:80]}"
 
 
 def _concurrent_calls(client: httpx.AsyncClient, settings: KeyMuxSettings, model: str) -> list:

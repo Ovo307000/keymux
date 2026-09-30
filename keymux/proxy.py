@@ -6,12 +6,13 @@ import time
 import uuid
 from collections.abc import Mapping
 
+import anyio
 import httpx
 from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
 
 from .config import KeyMuxSettings, RouteDefinition
-from .errors import KeyMuxError
+from .errors import ClientDisconnectedError, KeyMuxError
 from .headers import build_upstream_headers, filter_response_headers
 from .request_logging import RequestLogEntry, log_request
 from .routing import RouteRegistry
@@ -20,6 +21,7 @@ from .upstream import RouteUpstream, relay_body
 REQUEST_ID_HEADER = "x-request-id"
 ROUTER_KEY_HEADERS = ("authorization", "x-api-key")
 EVENT_STREAM_CONTENT_TYPE = "text/event-stream"
+DISCONNECT_POLL_SECONDS = 0.2
 
 
 class ProxyHandler:
@@ -78,21 +80,16 @@ class ProxyHandler:
         started_at: float,
     ) -> httpx.Response:
         upstream = self._upstreams[route.name]
-        try:
-            return await upstream.open_stream(
-                method=request.method,
-                path=request.url.path,
-                query=request.url.query,
-                headers=headers,
-                content=content or None,
-            )
-        except KeyMuxError as error:
-            _log_outcome(
-                request=request, request_id=request_id, route_name=route.name,
-                status_code=error.status_code, is_streaming=False,
-                egress_label=route.egress.label, started_at=started_at, error=error,
-            )
-            raise
+        outcome = await _send_until_disconnect(upstream, request, headers, content)
+        error = _outcome_error(outcome)
+        if error is None:
+            return outcome["response"]
+        _log_outcome(
+            request=request, request_id=request_id, route_name=route.name,
+            status_code=error.status_code, is_streaming=False,
+            egress_label=route.egress.label, started_at=started_at, error=error,
+        )
+        raise error
 
     def _relay(
         self,
@@ -126,6 +123,64 @@ def resolve_request_id(request: Request) -> str:
     if provided and provided.strip():
         return provided.strip()
     return uuid.uuid4().hex[:16]
+
+
+async def _send_until_disconnect(
+    upstream: RouteUpstream,
+    request: Request,
+    headers: Mapping[str, str],
+    content: bytes,
+) -> dict:
+    """Send the upstream request, but stop if the client hangs up first.
+
+    Without this, a client that disconnects while waiting for the upstream's
+    response head would leave that upstream request running until its timeout.
+    The task-group layout is the same one Starlette uses for the response phase.
+    """
+    outcome: dict = {}
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(
+            _send_upstream, task_group, outcome, upstream, request, headers, content
+        )
+        await _poll_until_disconnected(request)
+        task_group.cancel_scope.cancel()
+    return outcome
+
+
+async def _send_upstream(
+    task_group,
+    outcome: dict,
+    upstream: RouteUpstream,
+    request: Request,
+    headers: Mapping[str, str],
+    content: bytes,
+) -> None:
+    try:
+        outcome["response"] = await upstream.open_stream(
+            method=request.method,
+            path=request.url.path,
+            query=request.url.query,
+            headers=headers,
+            content=content or None,
+        )
+    except KeyMuxError as error:
+        outcome["error"] = error
+    task_group.cancel_scope.cancel()
+
+
+async def _poll_until_disconnected(request: Request) -> None:
+    """Return once the client is gone. Safe only after the body has been read."""
+    while not await request.is_disconnected():
+        await anyio.sleep(DISCONNECT_POLL_SECONDS)
+
+
+def _outcome_error(outcome: dict) -> KeyMuxError | None:
+    error = outcome.get("error")
+    if error is not None:
+        return error
+    if "response" not in outcome:
+        return ClientDisconnectedError("client disconnected before the upstream answered")
+    return None
 
 
 def _log_outcome(

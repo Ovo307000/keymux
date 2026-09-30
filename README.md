@@ -149,6 +149,9 @@ Notes:
   it - the tool replaces everything from its marker to the end of the file.
 * Re-run the tool after switching to a different profile, or if a subscription
   update renames the nodes.
+* The tool validates the node names, the ports and the resulting YAML **before**
+  writing anything, backs both files up, and restores them if mihomo rejects the
+  result.
 * No REST API juggling, no round-robin, no per-request node switching.
 
 ## Run
@@ -181,8 +184,9 @@ It checks, against the real network:
 | egress public IPs | each egress proxy reports a public IP, and they differ |
 | non-streaming completion | every router key gets a real `200` from the upstream |
 | streaming (SSE) | `text/event-stream` arrives in several chunks, not one buffer |
-| error handling | KeyMux answers `401` itself; upstream 4xx passes through unchanged |
-| concurrency | parallel requests produce no KeyMux-side failures |
+| KeyMux 401 handling | no key and an unknown key are both answered `401` by KeyMux itself |
+| upstream error passthrough | an upstream `4xx` reaches the client unchanged, body and content type included |
+| concurrency | parallel requests produce no KeyMux-side failure (an upstream `5xx` or `429` that travelled back untouched is reported separately, not counted as a defect) |
 | router key -> real key + exit IP | a throwaway instance pointed at `httpbin` shows that each router key forwards **its own** real key and leaves from **its own** IP, also under concurrency |
 
 ## Use it from Codex
@@ -297,7 +301,8 @@ mocked out.
 * **Mihomo will not start after an edit.** A `listeners:` entry names a node
   that no longer exists. Fix or remove the block in the profile's merge file
   (Clash Verge Rev data directory, `profiles/<merge file>.yaml`), or re-run
-  `tools/setup_clash_listeners.py` with current node names.
+  `tools/setup_clash_listeners.py` with current node names. The tool writes a
+  `*.keymux-<timestamp>.bak` next to each file it changes.
 * **`502` from KeyMux.** Check that Clash is running and that both listener
   ports answer: `python tools/egress_probe.py`.
 * **Both routes report the same public IP.** Choose different nodes and re-run
@@ -314,3 +319,18 @@ mocked out.
   the status code is passed back so the client decides.
 * **No database, queue, container or user interface.** This is a local
   single-process router.
+
+## Known limitations
+
+* **A stream that breaks after the response head is already sent cannot become a
+  `5xx`.** Once KeyMux has forwarded `200` and `text/event-stream`, the status is
+  on the wire; if the upstream then dies, the client sees a truncated stream.
+  This is inherent to streaming, not something KeyMux can paper over.
+* **`GET /routes` is unauthenticated** and lists route names, upstream base URLs
+  and egress endpoints (never a key). That is safe while KeyMux binds loopback
+  only; if you ever set `server.allow_non_loopback: true`, put it behind
+  something that authenticates.
+* **The egress IP probe checks IPv4** (`tools/egress_probe.py`); a node that
+  only offers IPv6 egress would be reported as failing.
+* **Client disconnect while waiting for the upstream response head** is watched
+  with a 0.2 s poll, so cancellation is prompt but not instantaneous.

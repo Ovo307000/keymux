@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import re
 import unittest
 
 from keymux.main import create_app
@@ -141,6 +143,24 @@ class ProxyingTests(unittest.IsolatedAsyncioTestCase):
         # httpx negotiates its own coding because it transparently decodes.
         self.assertNotEqual(received.get("accept-encoding"), "identity")
 
+    async def test_hop_by_hop_headers_do_not_reach_the_upstream(self) -> None:
+        distinctive = "x-keymux-hop-by-hop-test"
+        response = await self.client.get(
+            "/v1/request-headers",
+            headers={
+                "Authorization": f"Bearer {ROUTER_KEY_A}",
+                "connection": distinctive,
+                "proxy-connection": distinctive,
+                "proxy-authorization": "Basic c2VjcmV0",
+            },
+        )
+
+        received = response.json()
+        for name in ("connection", "proxy-connection", "proxy-authorization"):
+            self.assertNotEqual(received.get(name), distinctive, name)
+        self.assertNotIn("proxy-connection", received)
+        self.assertNotIn("proxy-authorization", received)
+
     async def test_upstream_status_body_and_content_type_are_preserved(self) -> None:
         for status_code in PRESERVED_STATUS_CODES:
             with self.subTest(status_code=status_code):
@@ -178,107 +198,6 @@ class ProxyingTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(response.headers["x-request-id"], "trace-42")
-
-
-class FailureMappingTests(unittest.IsolatedAsyncioTestCase):
-    """Failures that happen before an upstream response exists keep a real code."""
-
-    async def asyncSetUp(self) -> None:
-        self.upstream_state = UpstreamState()
-        self.upstream = start_upstream(self.upstream_state)
-        self.addCleanup(self.upstream.stop)
-
-    async def test_upstream_connection_refused_is_502(self) -> None:
-        server = start_keymux_offline()
-        self.addCleanup(server.stop)
-        client = make_client(server.base_url)
-        self.addAsyncCleanup(client.aclose)
-
-        response = await client.get("/v1/models", headers={"Authorization": "Bearer router-key-a"})
-
-        self.assertEqual(response.status_code, 502)
-        self.assertEqual(response.json()["error"]["code"], "upstream_connection_failed")
-
-    async def test_unreachable_egress_proxy_is_502(self) -> None:
-        server = start_keymux_offline(proxy="http://127.0.0.1:1")
-        self.addCleanup(server.stop)
-        client = make_client(server.base_url)
-        self.addAsyncCleanup(client.aclose)
-
-        response = await client.get("/v1/models", headers={"Authorization": "Bearer router-key-a"})
-
-        self.assertEqual(response.status_code, 502)
-        self.assertEqual(response.json()["error"]["code"], "upstream_connection_failed")
-
-    async def test_upstream_read_timeout_is_504(self) -> None:
-        routes = (
-            build_route("account-a", "router-key-a", self.upstream.base_url, "sk-real-a"),
-        )
-        server = start_keymux_with(routes, read_timeout_seconds=0.5)
-        self.addCleanup(server.stop)
-        client = make_client(server.base_url)
-        self.addAsyncCleanup(client.aclose)
-
-        response = await client.get("/v1/slow", headers={"Authorization": "Bearer router-key-a"})
-
-        self.assertEqual(response.status_code, 504)
-        self.assertEqual(response.json()["error"]["code"], "upstream_timeout")
-
-
-class EndpointTests(unittest.IsolatedAsyncioTestCase):
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.upstream_state = UpstreamState()
-        cls.upstream = start_upstream(cls.upstream_state)
-        cls.keymux = start_keymux(
-            create_app(
-                build_settings(
-                    (
-                        build_route("account-a", ROUTER_KEY_A, cls.upstream.base_url, REAL_KEY_A,
-                                    proxy="http://127.0.0.1:7893", egress_label="node-a"),
-                        build_route("account-b", ROUTER_KEY_B, cls.upstream.base_url, REAL_KEY_B,
-                                    proxy="http://127.0.0.1:7894", egress_label="node-b"),
-                    )
-                )
-            )
-        )
-
-    @classmethod
-    def tearDownClass(cls) -> None:
-        cls.keymux.stop()
-        cls.upstream.stop()
-
-    async def asyncSetUp(self) -> None:
-        self.client = make_client(self.keymux.base_url)
-        self.addAsyncCleanup(self.client.aclose)
-
-    async def test_health_is_ok(self) -> None:
-        response = await self.client.get("/health")
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), {"status": "ok"})
-
-    async def test_routes_lists_both_routes_without_secrets(self) -> None:
-        response = await self.client.get("/routes")
-
-        body = response.text
-        self.assertEqual(response.status_code, 200)
-        self.assertIn("account-a", body)
-        self.assertIn("account-b", body)
-        self.assertIn("http://127.0.0.1:7893", body)
-        for secret in (ROUTER_KEY_A, ROUTER_KEY_B, REAL_KEY_A, REAL_KEY_B):
-            self.assertNotIn(secret, body)
-
-    async def test_unknown_path_is_404(self) -> None:
-        response = await self.client.get("/not-v1")
-
-        self.assertEqual(response.status_code, 404)
-
-
-def start_keymux_offline(proxy: str | None = None):
-    """KeyMux whose upstream is a dead port, optionally behind a dead proxy."""
-    routes = (build_route("account-a", "router-key-a", "http://127.0.0.1:1", "sk-real-a", proxy=proxy),)
-    return start_keymux_with(routes)
 
 
 if __name__ == "__main__":

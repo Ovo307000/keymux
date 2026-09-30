@@ -83,6 +83,19 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
 
         await self._wait_for_upstream_abort()
 
+    async def test_client_disconnect_while_waiting_for_upstream_headers_aborts_it(self) -> None:
+        # A raw socket, because httpx blocks on the response head: the point is
+        # to hang up while KeyMux is still waiting for the upstream to answer.
+        writer = await _open_raw_request(
+            self.keymux.port, f"GET /v1/slow HTTP/1.1\r\nHost: keymux\r\n"
+            f"Authorization: Bearer {ROUTER_KEY_A}\r\nConnection: close\r\n\r\n"
+        )
+        await asyncio.sleep(0.4)
+        writer.close()
+        await writer.wait_closed()
+
+        await self._wait_for_upstream_abort()
+
     async def _wait_for_upstream_abort(self) -> None:
         deadline = time.monotonic() + CLIENT_DISCONNECT_GRACE_SECONDS
         while time.monotonic() < deadline:
@@ -91,6 +104,13 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
                     return
             await asyncio.sleep(0.1)
         self.fail("KeyMux kept reading the upstream after the client disconnected")
+
+
+async def _open_raw_request(port: int, raw_request: str):
+    _, writer = await asyncio.open_connection("127.0.0.1", port)
+    writer.write(raw_request.encode("utf-8"))
+    await writer.drain()
+    return writer
 
 
 if __name__ == "__main__":

@@ -67,3 +67,24 @@ dependencies beyond the runtime requirements.
 **Responses must have `content-length` and `content-encoding` removed**:
 httpx transparently decodes the body, so forwarding the upstream's values
 describes bytes the client will not receive.
+
+**`secrets.compare_digest` raises `TypeError` on a non-ASCII `str`.** HTTP header
+values arrive as bytes and uvicorn decodes them as latin-1, so any client can
+send a non-ASCII router key. Compare UTF-8 bytes, or an unauthenticated request
+becomes a 500.
+
+**`str(httpx_error)` embeds the request URL and, for proxy failures, the proxy
+URL.** Never echo it to a client or a log; keep `type(error).__name__`.
+
+**Disconnect handling needs two layers.** Starlette cancels the response
+generator on disconnect, which covers the streaming phase. The window before
+upstream response headers arrive is not covered by that, so the send itself has
+to be wrapped in a task group that polls `request.is_disconnected()` — the same
+task-group shape Starlette uses internally.
+
+**httpx's `is_disconnected()`-style polling is only safe after the whole request
+body has been read**, otherwise the poll consumes a body message.
+
+**`yaml.safe_dump` beats an f-string for writing node names into another
+program's configuration file.** Proxy names legitimately contain quotes, colons
+and `#`.

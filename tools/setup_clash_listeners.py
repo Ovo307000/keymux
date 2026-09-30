@@ -1,14 +1,18 @@
 """Pin Clash Verge Rev / mihomo listeners to fixed outbound nodes.
 
-KeyMux reaches the internet through one Clash listener per route, so each
-route leaves from a fixed node and therefore a fixed public IP. This tool
+KeyMux reaches the internet through one Clash listener per route, so each route
+leaves from a fixed node and therefore a fixed public IP. This tool
 
 1. locates the Clash Verge Rev data directory and the merge file that belongs
    to the currently selected profile,
-2. refuses to write if a requested node does not exist in the running config,
-3. writes the listeners into that merge file (so a subscription update keeps
-   them) and into the generated runtime config,
-4. reloads mihomo through its named-pipe controller, and
+2. refuses to write if a requested node does not exist in the running
+   configuration, if a listener would collide with a pre-existing ``listeners:``
+   section, or if the result would not parse as YAML,
+3. backs up both files, writes the listeners into the merge file (so a
+   subscription update keeps them) and into the generated runtime
+   configuration,
+4. reloads mihomo through its named-pipe controller and, if mihomo rejects the
+   result, restores the backups so the next start still works, and
 5. reports the public IP observed through every listener.
 
 Usage::
@@ -22,12 +26,15 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+
+import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -37,8 +44,12 @@ VERGE_DATA_DIRECTORY_NAME = "io.github.clash-verge-rev.clash-verge-rev"
 RUNTIME_CONFIG_FILENAME = "clash-verge.yaml"
 PROFILES_INDEX_FILENAME = "profiles.yaml"
 MANAGED_BLOCK_MARKER = "# --- keymux managed listeners (generated, keep this block last) ---"
+TOP_LEVEL_LISTENERS_PATTERN = re.compile(r"(?m)^listeners:\s*$")
 EGRESS_PROBE_URL = "https://api.ipify.org"
 PROBE_TIMEOUT_SECONDS = 25
+MIN_PORT = 1
+MAX_PORT = 65535
+RELOAD_SUCCESS_CODES = (200, 204)
 
 
 @dataclass(frozen=True)
@@ -58,7 +69,6 @@ class VergeLayout:
 def main() -> int:
     arguments = _parse_arguments()
     listeners = _parse_listeners(arguments.listener)
-
     layout = locate_verge_layout()
     print(f"verge data directory : {layout.data_directory}")
     print(f"runtime configuration: {layout.runtime_config}")
@@ -68,85 +78,132 @@ def main() -> int:
     _require_nodes_present([listener.node for listener in listeners], secret)
 
     block = render_managed_block(listeners)
-    _backup(layout.merge_file)
-    _backup(layout.runtime_config)
-    write_managed_block(layout.merge_file, block)
-    write_managed_block(layout.runtime_config, block)
+    merged = prepare_managed_content(layout.merge_file, block)
+    runtime = prepare_managed_content(layout.runtime_config, block)
+
+    backups = _backup_all(layout)
+    _write_text(layout.merge_file, merged)
+    _write_text(layout.runtime_config, runtime)
     print("wrote listeners into the merge file and the runtime configuration")
 
     status, body = mihomo_controller.reload_runtime_config(layout.runtime_config, secret)
-    if status not in (200, 204):
+    if status not in RELOAD_SUCCESS_CODES:
         print(f"mihomo rejected the configuration: HTTP {status} {body[:400]!r}", file=sys.stderr)
+        _restore_and_reload(backups, layout.runtime_config, secret)
         return 1
     print(f"mihomo reloaded the configuration (HTTP {status})")
 
-    if not arguments.no_verify:
-        return _report_egress_ip(listeners)
-    return 0
+    if arguments.no_verify:
+        return 0
+    return _report_egress_ip(listeners)
 
 
 def locate_verge_layout() -> VergeLayout:
     data_directory = Path(os.environ["APPDATA"]) / VERGE_DATA_DIRECTORY_NAME
     if not data_directory.is_dir():
         raise SystemExit(f"Clash Verge Rev data directory not found: {data_directory}")
-
-    runtime_config = data_directory / RUNTIME_CONFIG_FILENAME
-    profiles_directory = data_directory / "profiles"
-    merge_file = profiles_directory / _current_merge_filename(
-        data_directory / PROFILES_INDEX_FILENAME
+    return VergeLayout(
+        data_directory=data_directory,
+        runtime_config=data_directory / RUNTIME_CONFIG_FILENAME,
+        merge_file=data_directory / "profiles"
+        / _current_merge_filename(data_directory / PROFILES_INDEX_FILENAME),
     )
-    return VergeLayout(data_directory, runtime_config, merge_file)
 
 
 def _current_merge_filename(profiles_index: Path) -> str:
     document = _load_yaml(profiles_index)
     current_uid = document["current"]
-    for item in document["items"]:
-        if item["uid"] != current_uid:
-            continue
-        merge_uid = (item.get("option") or {}).get("merge")
-        if not merge_uid:
-            raise SystemExit(
-                f"the selected profile {current_uid!r} has no merge profile attached; "
-                "create one in Clash Verge Rev first"
-            )
-        for candidate in document["items"]:
-            if candidate["uid"] == merge_uid:
-                return candidate["file"]
+    items = {item["uid"]: item for item in document["items"]}
+    if current_uid not in items:
+        raise SystemExit(f"current profile {current_uid!r} is missing from profiles.yaml")
+    merge_uid = (items[current_uid].get("option") or {}).get("merge")
+    if not merge_uid:
+        raise SystemExit(
+            f"the selected profile {current_uid!r} has no merge profile attached; "
+            "create one in Clash Verge Rev first"
+        )
+    if merge_uid not in items:
         raise SystemExit(f"merge profile {merge_uid!r} is missing from profiles.yaml")
-    raise SystemExit(f"current profile {current_uid!r} is missing from profiles.yaml")
+    return items[merge_uid]["file"]
 
 
 def _load_yaml(path: Path) -> dict:
-    import yaml
-
     with path.open(encoding="utf-8") as handle:
         return yaml.safe_load(handle)
 
 
 def render_managed_block(listeners: tuple[Listener, ...]) -> str:
-    lines = [MANAGED_BLOCK_MARKER, "listeners:"]
-    for listener in listeners:
-        lines.extend(
-            [
-                f"  - name: {listener.name}",
-                "    type: mixed",
-                "    listen: 127.0.0.1",
-                f"    port: {listener.port}",
-                f'    proxy: "{listener.node}"',
-            ]
-        )
-    return "\n".join(lines) + "\n"
+    """Render the block through a YAML dumper, so node names cannot break it."""
+    document = {
+        "listeners": [
+            {
+                "name": listener.name,
+                "type": "mixed",
+                "listen": "127.0.0.1",
+                "port": listener.port,
+                "proxy": listener.node,
+            }
+            for listener in listeners
+        ]
+    }
+    dumped = yaml.safe_dump(
+        document, allow_unicode=True, sort_keys=False, default_flow_style=False, width=1000
+    )
+    return f"{MANAGED_BLOCK_MARKER}\n{dumped}"
 
 
-def write_managed_block(path: Path, block: str) -> None:
-    """Replace the managed block, keeping everything above it untouched."""
+def prepare_managed_content(path: Path, block: str) -> str:
+    """Return the new file content, or refuse before anything is written."""
     existing = path.read_text(encoding="utf-8") if path.is_file() else ""
     marker_index = existing.find(MANAGED_BLOCK_MARKER)
-    head = existing[:marker_index] if marker_index != -1 else existing
-    head = head.rstrip("\n")
+    head = (existing[:marker_index] if marker_index != -1 else existing).rstrip("\n")
+    if TOP_LEVEL_LISTENERS_PATTERN.search(head):
+        raise SystemExit(
+            f"refusing to write {path}: it already declares a top-level 'listeners:' section "
+            "outside the managed block. Merge the two by hand first."
+        )
     content = f"{head}\n\n{block}" if head else block
+    _require_parseable(content, path)
+    return content
+
+
+def _require_parseable(content: str, path: Path) -> None:
+    try:
+        document = yaml.safe_load(content)
+    except yaml.YAMLError as error:
+        raise SystemExit(f"refusing to write {path}: the result is not valid YAML ({error})") from error
+    if not isinstance(document, dict) or not isinstance(document.get("listeners"), list):
+        raise SystemExit(f"refusing to write {path}: the result has no usable 'listeners' list")
+
+
+def _write_text(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8", newline="\n")
+
+
+def _backup_all(layout: VergeLayout) -> list[tuple[Path, Path]]:
+    return [
+        (path, _backup(path))
+        for path in (layout.merge_file, layout.runtime_config)
+        if path.is_file()
+    ]
+
+
+def _backup(path: Path) -> Path:
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    backup = path.with_suffix(path.suffix + f".keymux-{stamp}.bak")
+    shutil.copy2(path, backup)
+    return backup
+
+
+def _restore_and_reload(
+    backups: list[tuple[Path, Path]], runtime_config: Path, secret: str
+) -> None:
+    for original, backup in backups:
+        shutil.copy2(backup, original)
+    mihomo_controller.reload_runtime_config(runtime_config, secret)
+    print("restored the previous configuration from:", file=sys.stderr)
+    for _, backup in backups:
+        print(f"  {backup}", file=sys.stderr)
 
 
 def _require_nodes_present(nodes: list[str], secret: str) -> None:
@@ -166,13 +223,6 @@ def _similar(node: str, available: set[str]) -> list[str]:
     return sorted(name for name in available if stem and stem in name)[:8]
 
 
-def _backup(path: Path) -> None:
-    if not path.is_file():
-        return
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    shutil.copy2(path, path.with_suffix(path.suffix + f".keymux-{stamp}.bak"))
-
-
 def _report_egress_ip(listeners: tuple[Listener, ...]) -> int:
     failures = 0
     observed: dict[str, str] = {}
@@ -182,8 +232,7 @@ def _report_egress_ip(listeners: tuple[Listener, ...]) -> int:
         print(f"{listener.port}  {listener.node}  ->  {address}")
         if not _looks_like_ip(address):
             failures += 1
-    distinct = set(observed.values())
-    if len(distinct) < len(listeners):
+    if len(set(observed.values())) < len(listeners):
         print("warning: listeners do not all show a distinct public IP", file=sys.stderr)
         failures += 1
     return 1 if failures else 0
@@ -217,11 +266,24 @@ def _parse_listeners(raw: list[list[str]] | None) -> tuple[Listener, ...]:
     for parts in raw:
         if len(parts) < 3:
             raise SystemExit(f"malformed --listener {parts!r}; expected NAME PORT NODE")
-        listeners.append(Listener(name=parts[0], port=int(parts[1]), node=" ".join(parts[2:])))
-    ports = [listener.port for listener in listeners]
-    if len(set(ports)) != len(ports):
+        if not parts[0].strip():
+            raise SystemExit("listener names must not be empty")
+        listeners.append(Listener(name=parts[0], port=_port(parts[1]), node=" ".join(parts[2:])))
+    if len({listener.port for listener in listeners}) != len(listeners):
         raise SystemExit("listener ports must be unique")
+    if len({listener.name for listener in listeners}) != len(listeners):
+        raise SystemExit("listener names must be unique")
     return tuple(listeners)
+
+
+def _port(value: str) -> int:
+    try:
+        port = int(value)
+    except ValueError as error:
+        raise SystemExit(f"listener port {value!r} is not an integer") from error
+    if not MIN_PORT <= port <= MAX_PORT:
+        raise SystemExit(f"listener port {port} is outside {MIN_PORT}-{MAX_PORT}")
+    return port
 
 
 def _parse_arguments() -> argparse.Namespace:
